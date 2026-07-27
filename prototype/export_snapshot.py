@@ -19,67 +19,79 @@ def format_timestamp(epoch_seconds):
     return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def build_export_dict(graph, confirmed_timelines, events):
-    """Build the data dict for embedding in HTML.
-
-    Returns:
-        {
-            "members": [
-                {
-                    "confirmed_id": str,
-                    "escalation": {"score": float, "classification": str, "breakdown": {...}},
-                    "timeline": [{"event_id", "channel", "event_type", "timestamp_str",
-                                  "resolved", "human_agent"}, ...],
-                    "audit": [{"event_id", "linked_to": [{"other_id", "type", "signal",
-                              "confidence", "reason"}, ...]}, ...]
-                },
-                ...
-            ],
-            "summary": {"total_members": int, "alerts": int, "queue": int, "normal": int}
-        }
+def explain_score(breakdown, classification):
+    """Plain-English sentence for why a case scored the way it did -- the
+    breakdown components (C/T/R/res/P) mean nothing to an analyst on sight,
+    so this is what actually answers "why am I looking at this case."
     """
+    switches = breakdown["switches"]
+    repeat_calls = breakdown["repeat_calls"]
+    hours = breakdown["hours"]
+    resolved = breakdown["res"] >= 1.0
+
+    clauses = []
+    if switches >= 2:
+        clauses.append(f"switched channels {switches} times")
+    if repeat_calls >= 1:
+        times = "time" if repeat_calls == 1 else "times"
+        clauses.append(f"called back {repeat_calls} {times} after the first contact")
+    if not resolved:
+        clauses.append(f"is still unresolved after {hours / 24:.1f} days" if hours >= 24
+                        else "is still unresolved")
+    elif hours >= 24:
+        clauses.append(f"took {hours / 24:.1f} days to resolve")
+
+    if not clauses:
+        return "Single-channel activity, resolved without any repeat contact."
+
+    if len(clauses) == 1:
+        body = clauses[0]
+    elif len(clauses) == 2:
+        body = f"{clauses[0]} and {clauses[1]}"
+    else:
+        body = ", ".join(clauses[:-1]) + f", and {clauses[-1]}"
+
+    prefix = {
+        "alert": "Escalated because this customer",
+        "queue": "Flagged for review because this customer",
+        "normal": "This customer",
+    }[classification]
+    return f"{prefix} {body}."
+
+
+def build_export_dict(graph, confirmed_timelines, events):
+    """Build the data dict for embedding in HTML."""
     members_data = []
     counts = {"alert": 0, "queue": 0, "normal": 0}
-
-    # Index all events by event_id for fast lookup
     event_by_id = {e.event_id: e for e in events}
 
-    for confirmed_id, journey in sorted(confirmed_timelines.items()):
+    for case_number, (confirmed_id, journey) in enumerate(sorted(confirmed_timelines.items()), start=1):
         if not journey:
             continue
 
-        # Compute escalation metrics
         breakdown = escalation_breakdown(journey)
         score = breakdown["score"]
         classification = classify_escalation(score)
         counts[classification] += 1
 
-        # Build timeline with readable timestamps
-        timeline = []
-        for event in journey:  # already sorted by timestamp
-            timeline.append({
-                "event_id": event.event_id,
-                "channel": event.channel,
-                "event_type": event.event_type,
-                "timestamp": event.timestamp,
-                "timestamp_str": format_timestamp(event.timestamp),
-                "resolved": event.resolved,
-                "human_agent": event.human_agent,
-            })
+        timeline = [{
+            "event_id": event.event_id,
+            "channel": event.channel,
+            "event_type": event.event_type,
+            "timestamp": event.timestamp,
+            "timestamp_str": format_timestamp(event.timestamp),
+            "resolved": event.resolved,
+            "human_agent": event.human_agent,
+        } for event in journey]  # already sorted by timestamp
 
-        # Build audit edges: for each event in this member's journey,
-        # show all edges (deterministic/probabilistic/tiebreaker) to other events
+        # Audit edges: for each event in this member's journey, every edge
+        # (deterministic/probabilistic/tiebreaker) linking it to another event.
         audit = []
         for event in journey:
-            edges = graph.edges_for(event.event_id)
             linked_to = []
-            for edge in edges:
-                # Determine which endpoint is the "other" event
+            for edge in graph.edges_for(event.event_id):
                 other_id = edge.v if edge.u == event.event_id else edge.u
                 other_event = event_by_id.get(other_id)
-
-                # Only include if other event is in a different journey (cross-identity)
-                # or same journey (for showing intra-member links)
                 if other_event:
                     linked_to.append({
                         "other_event_id": other_id,
@@ -90,23 +102,16 @@ def build_export_dict(graph, confirmed_timelines, events):
                         "confidence": edge.confidence,
                         "reason": edge.reason,
                     })
-
-            audit.append({
-                "event_id": event.event_id,
-                "linked_to": linked_to,
-            })
+            audit.append({"event_id": event.event_id, "linked_to": linked_to})
 
         members_data.append({
             "confirmed_id": confirmed_id,
+            "case_number": case_number,
             "escalation": {
                 "score": score,
                 "classification": classification,
+                "reason_text": explain_score(breakdown, classification),
                 "breakdown": {
-                    "C": breakdown["C"],  # channel switches component
-                    "T": breakdown["T"],  # time component
-                    "R": breakdown["R"],  # repeat calls component
-                    "res": breakdown["res"],  # resolved component
-                    "P": breakdown["P"],  # human agent component
                     "switches": breakdown["switches"],
                     "hours": breakdown["hours"],
                     "repeat_calls": breakdown["repeat_calls"],
@@ -145,7 +150,6 @@ def main():
     print(f"  Queue (65 < score <= 85): {summary['queue']}")
     print(f"  Normal (score <= 65): {summary['normal']}")
 
-    # Generate HTML dashboard
     output_path = "analyst_dashboard.html"
     html_content = generate_html(export_data)
 
@@ -158,7 +162,15 @@ def main():
 
 
 def generate_html(data):
-    """Generate self-contained HTML with embedded JSON data."""
+    """Generate self-contained HTML with embedded JSON data.
+
+    Design: a "case file" reading room, not a generic admin table. Serif for
+    the narrative (case headers, the plain-language "why"), sans for UI
+    chrome (tabs, controls, labels), monospace for raw system identifiers
+    (event/case IDs) -- so the typeface itself tells you whether you're
+    reading the story or reading the machine's bookkeeping. No external
+    fonts/CDNs: the whole thing has to work offline from a double-clicked file.
+    """
     json_data = json.dumps(data, indent=2)
 
     return f"""<!DOCTYPE html>
@@ -166,642 +178,467 @@ def generate_html(data):
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Amex Identity Resolution Analyst Dashboard</title>
+    <title>Case Review -- Cross-Channel Journey Dashboard</title>
     <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-
-        html {{
-            background-color: #f5f5f5;
-            color: #333;
+        :root {{
+            --paper: #f7f4ee;
+            --paper-raised: #ffffff;
+            --ink: #24262b;
+            --ink-soft: #6b6558;
+            --rule: #e1dacb;
+            --brand: #1f4e79;
+            --brand-soft: #d9e6f0;
+            --alert: #a53326;
+            --alert-soft: #f6ded9;
+            --queue: #93600c;
+            --queue-soft: #f3e4c8;
+            --normal: #726c5e;
+            --normal-soft: #edeae0;
+            --resolved: #3f6144;
+            --resolved-soft: #dfe9de;
+            --ch-app: #2f5d8a;
+            --ch-web: #3f7a5c;
+            --ch-call: #96501a;
+            --ch-branch: #5c4d82;
+            --font-display: Georgia, "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+            --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            --font-mono: "SF Mono", "Cascadia Code", Consolas, "Liberation Mono", monospace;
         }}
 
         @media (prefers-color-scheme: dark) {{
-            html {{
-                background-color: #1a1a1a;
-                color: #e0e0e0;
+            :root {{
+                --paper: #1a1b1e;
+                --paper-raised: #232427;
+                --ink: #ece8de;
+                --ink-soft: #a29c8d;
+                --rule: #38393d;
+                --brand: #7fb0dd;
+                --brand-soft: #1e3244;
+                --alert: #e3897c;
+                --alert-soft: #3b241f;
+                --queue: #dcb267;
+                --queue-soft: #3a2e17;
+                --normal: #a39d8c;
+                --normal-soft: #2a2924;
+                --resolved: #8ec293;
+                --resolved-soft: #21301f;
+                --ch-app: #7fb0dd;
+                --ch-web: #86c9a1;
+                --ch-call: #dd9862;
+                --ch-branch: #b09fdb;
             }}
         }}
+
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+
+        html {{ background: var(--paper); }}
 
         body {{
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            line-height: 1.5;
-            padding: 20px;
+            font-family: var(--font-body);
+            color: var(--ink);
+            line-height: 1.55;
+            padding: 32px 20px 80px;
         }}
 
-        .container {{
-            max-width: 1400px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            padding: 20px;
+        .page {{ max-width: 1180px; margin: 0 auto; }}
+
+        header.masthead {{
+            border-bottom: 3px solid var(--ink);
+            padding-bottom: 18px;
+            margin-bottom: 22px;
         }}
 
-        @media (prefers-color-scheme: dark) {{
-            .container {{
-                background: #2a2a2a;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.3);
-            }}
+        .eyebrow {{
+            font-size: 11px;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            color: var(--ink-soft);
+            font-weight: 600;
+            margin-bottom: 6px;
         }}
 
         h1 {{
-            font-size: 28px;
-            margin-bottom: 10px;
-            color: #003d82;
+            font-family: var(--font-display);
+            font-size: 30px;
+            font-weight: 700;
+            letter-spacing: -0.01em;
         }}
 
-        @media (prefers-color-scheme: dark) {{
-            h1 {{
-                color: #66b3ff;
-            }}
+        .mission {{
+            font-size: 14.5px;
+            color: var(--ink-soft);
+            margin-top: 8px;
+            max-width: 62ch;
         }}
 
-        .header-info {{
-            font-size: 14px;
-            color: #666;
-            margin-bottom: 20px;
-            padding-bottom: 15px;
-            border-bottom: 1px solid #ddd;
+        details.legend {{
+            margin-top: 16px;
+            background: var(--paper-raised);
+            border: 1px solid var(--rule);
+            border-radius: 6px;
+            padding: 12px 16px;
         }}
 
-        @media (prefers-color-scheme: dark) {{
-            .header-info {{
-                color: #999;
-                border-bottom-color: #444;
-            }}
+        details.legend summary {{
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--brand);
+            list-style: none;
         }}
 
-        .tabs {{
+        details.legend summary::-webkit-details-marker {{ display: none; }}
+        details.legend summary::after {{ content: " \\2192"; }}
+        details.legend[open] summary::after {{ content: " \\2193"; }}
+
+        .legend-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 14px;
+            margin-top: 14px;
+            font-size: 13px;
+            color: var(--ink-soft);
+        }}
+
+        .legend-grid dt {{ font-weight: 700; color: var(--ink); margin-bottom: 2px; }}
+        .legend-grid dd {{ margin: 0 0 10px; }}
+
+        nav.tabs {{
             display: flex;
-            gap: 0;
-            margin-bottom: 20px;
-            border-bottom: 2px solid #ddd;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .tabs {{
-                border-bottom-color: #444;
-            }}
+            gap: 4px;
+            margin: 26px 0 20px;
+            border-bottom: 1px solid var(--rule);
         }}
 
         .tab-button {{
-            padding: 12px 20px;
-            border: none;
-            background: none;
+            font-family: var(--font-body);
+            padding: 10px 18px;
+            border: 1px solid var(--rule);
+            border-bottom: none;
+            background: var(--paper);
+            color: var(--ink-soft);
             cursor: pointer;
-            font-size: 14px;
-            font-weight: 500;
-            color: #666;
-            border-bottom: 3px solid transparent;
-            transition: all 0.2s;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .tab-button {{
-                color: #999;
-            }}
+            font-size: 13.5px;
+            font-weight: 600;
+            border-radius: 6px 6px 0 0;
+            position: relative;
+            top: 1px;
         }}
 
         .tab-button.active {{
-            color: #003d82;
-            border-bottom-color: #003d82;
+            background: var(--paper-raised);
+            color: var(--brand);
+            border-color: var(--rule);
+            border-bottom: 1px solid var(--paper-raised);
         }}
 
-        @media (prefers-color-scheme: dark) {{
-            .tab-button.active {{
-                color: #66b3ff;
-                border-bottom-color: #66b3ff;
-            }}
+        .view {{ display: none; }}
+        .view.active {{ display: block; }}
+
+        .view-intro {{
+            font-size: 13.5px;
+            color: var(--ink-soft);
+            margin-bottom: 16px;
+            max-width: 70ch;
         }}
 
-        .tab-button:hover {{
-            color: #003d82;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .tab-button:hover {{
-                color: #66b3ff;
-            }}
-        }}
-
-        .view {{
-            display: none;
-        }}
-
-        .view.active {{
-            display: block;
-        }}
-
-        /* Queue view */
-        .queue-controls {{
-            margin-bottom: 15px;
+        .controls {{
+            margin-bottom: 16px;
             display: flex;
-            gap: 10px;
+            gap: 12px;
             align-items: center;
+            flex-wrap: wrap;
         }}
 
-        .queue-controls input {{
-            padding: 8px 12px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
+        input[type="text"], select {{
+            font-family: var(--font-body);
+            padding: 7px 11px;
+            border: 1px solid var(--rule);
+            border-radius: 5px;
+            font-size: 13.5px;
+            background: var(--paper-raised);
+            color: var(--ink);
         }}
 
-        @media (prefers-color-scheme: dark) {{
-            .queue-controls input {{
-                background: #333;
-                border-color: #555;
-                color: #e0e0e0;
-            }}
-        }}
-
-        .queue-controls label {{
+        label.check {{
             display: flex;
             align-items: center;
             gap: 6px;
-            font-size: 14px;
+            font-size: 13px;
+            color: var(--ink-soft);
         }}
 
-        .queue-controls input[type="checkbox"] {{
-            width: auto;
-            padding: 0;
-        }}
-
-        table {{
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 14px;
-        }}
+        table {{ width: 100%; border-collapse: collapse; font-size: 13.5px; background: var(--paper-raised); }}
 
         th {{
             text-align: left;
-            padding: 12px;
-            background: #f5f5f5;
-            border-bottom: 2px solid #ddd;
-            font-weight: 600;
-            color: #333;
+            padding: 10px 12px;
+            border-bottom: 2px solid var(--ink);
+            font-size: 11px;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--ink-soft);
+            font-weight: 700;
             cursor: pointer;
             user-select: none;
         }}
 
-        @media (prefers-color-scheme: dark) {{
-            th {{
-                background: #333;
-                border-bottom-color: #555;
-                color: #e0e0e0;
-            }}
-        }}
+        th:hover {{ color: var(--brand); }}
 
-        th:hover {{
-            background: #eee;
-        }}
+        td {{ padding: 11px 12px; border-bottom: 1px solid var(--rule); vertical-align: middle; }}
+        tbody tr:hover {{ background: var(--brand-soft); cursor: pointer; }}
 
-        @media (prefers-color-scheme: dark) {{
-            th:hover {{
-                background: #3a3a3a;
-            }}
-        }}
-
-        td {{
-            padding: 12px;
-            border-bottom: 1px solid #eee;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            td {{
-                border-bottom-color: #444;
-            }}
-        }}
-
-        tbody tr:hover {{
-            background: #f9f9f9;
-            cursor: pointer;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            tbody tr:hover {{
-                background: #333;
-            }}
-        }}
+        .case-id {{ font-weight: 700; color: var(--brand); }}
+        .raw-id {{ font-family: var(--font-mono); font-size: 11px; color: var(--ink-soft); display: block; margin-top: 1px; }}
 
         .badge {{
             display: inline-block;
-            padding: 4px 8px;
+            padding: 3px 9px;
             border-radius: 3px;
-            font-size: 12px;
-            font-weight: 600;
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.03em;
         }}
 
-        .badge.alert {{
-            background: #fee;
-            color: #c33;
-        }}
+        .badge.alert {{ background: var(--alert-soft); color: var(--alert); }}
+        .badge.queue {{ background: var(--queue-soft); color: var(--queue); }}
+        .badge.normal {{ background: var(--normal-soft); color: var(--normal); }}
 
-        @media (prefers-color-scheme: dark) {{
-            .badge.alert {{
-                background: #5c2e2e;
-                color: #ff6b6b;
-            }}
-        }}
-
-        .badge.queue {{
-            background: #ffeaa7;
-            color: #d97706;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .badge.queue {{
-                background: #5c4e2e;
-                color: #fbbf24;
-            }}
-        }}
-
-        .badge.normal {{
-            background: #e0e0e0;
-            color: #666;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .badge.normal {{
-                background: #444;
-                color: #999;
-            }}
-        }}
-
-        /* Timeline */
-        .timeline-controls {{
-            margin-bottom: 15px;
-        }}
-
-        .timeline-controls select {{
-            padding: 8px 12px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 14px;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .timeline-controls select {{
-                background: #333;
-                border-color: #555;
-                color: #e0e0e0;
-            }}
-        }}
-
-        .timeline {{
+        .gauge-cell {{ min-width: 140px; }}
+        .gauge-track {{
             position: relative;
-            padding: 20px 0;
+            height: 6px;
+            border-radius: 3px;
+            background: linear-gradient(to right,
+                var(--normal-soft) 0%, var(--normal-soft) 65%,
+                var(--queue-soft) 65%, var(--queue-soft) 85%,
+                var(--alert-soft) 85%, var(--alert-soft) 100%);
+            margin-bottom: 4px;
         }}
+
+        .gauge-marker {{
+            position: absolute;
+            top: -3px;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            border: 2px solid var(--paper-raised);
+            transform: translateX(-50%);
+        }}
+
+        .gauge-marker.alert {{ background: var(--alert); }}
+        .gauge-marker.queue {{ background: var(--queue); }}
+        .gauge-marker.normal {{ background: var(--normal); }}
+
+        .gauge-score {{ font-size: 11px; color: var(--ink-soft); font-family: var(--font-mono); }}
+
+        .channel-pill {{
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 10.5px;
+            font-weight: 700;
+            color: white;
+            margin-right: 3px;
+        }}
+
+        .channel-pill.APP {{ background: var(--ch-app); }}
+        .channel-pill.WEB {{ background: var(--ch-web); }}
+        .channel-pill.CALL {{ background: var(--ch-call); }}
+        .channel-pill.BRANCH {{ background: var(--ch-branch); }}
+
+        .case-header {{
+            background: var(--paper-raised);
+            border: 1px solid var(--rule);
+            border-left: 4px solid var(--brand);
+            border-radius: 6px;
+            padding: 16px 20px;
+            margin-bottom: 20px;
+        }}
+
+        .case-header .case-title {{
+            font-family: var(--font-display);
+            font-size: 19px;
+            font-weight: 700;
+            margin-bottom: 2px;
+        }}
+
+        .case-header .raw-id {{ margin-bottom: 10px; }}
+
+        .case-header .reason {{
+            font-size: 14.5px;
+            line-height: 1.5;
+            margin-top: 10px;
+        }}
+
+        .timeline {{ position: relative; padding: 10px 0; }}
 
         .timeline-event {{
             display: flex;
-            gap: 20px;
-            margin-bottom: 20px;
+            gap: 16px;
+            margin-bottom: 4px;
             position: relative;
-            padding-left: 30px;
+            padding: 12px 0 12px 26px;
+            border-left: 2px solid var(--rule);
         }}
+
+        .timeline-event:last-child {{ border-left: 2px solid transparent; }}
 
         .timeline-event::before {{
             content: '';
             position: absolute;
-            left: 0;
-            top: 8px;
+            left: -7px;
+            top: 16px;
             width: 12px;
             height: 12px;
             border-radius: 50%;
-            background: #ddd;
-            border: 2px solid white;
+            border: 2px solid var(--paper);
         }}
 
-        @media (prefers-color-scheme: dark) {{
-            .timeline-event::before {{
-                background: #666;
-                border-color: #2a2a2a;
-            }}
-        }}
+        .timeline-event.APP::before {{ background: var(--ch-app); }}
+        .timeline-event.WEB::before {{ background: var(--ch-web); }}
+        .timeline-event.CALL::before {{ background: var(--ch-call); }}
+        .timeline-event.BRANCH::before {{ background: var(--ch-branch); }}
 
-        .timeline-event.APP::before {{
-            background: #4285f4;
-        }}
+        .timeline-header {{ display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 3px; }}
 
-        .timeline-event.WEB::before {{
-            background: #34a853;
-        }}
+        .event-type {{ font-weight: 700; font-size: 14px; }}
 
-        .timeline-event.CALL::before {{
-            background: #ea4335;
-        }}
-
-        .timeline-event.BRANCH::before {{
-            background: #fbbc04;
-        }}
-
-        .timeline-content {{
-            flex: 1;
-        }}
-
-        .timeline-header {{
-            display: flex;
-            gap: 10px;
-            align-items: center;
-            margin-bottom: 4px;
-            flex-wrap: wrap;
-        }}
-
-        .channel-badge {{
-            display: inline-block;
-            padding: 3px 8px;
-            border-radius: 3px;
-            font-size: 11px;
-            font-weight: 700;
-            color: white;
-        }}
-
-        .channel-badge.APP {{
-            background: #4285f4;
-        }}
-
-        .channel-badge.WEB {{
-            background: #34a853;
-        }}
-
-        .channel-badge.CALL {{
-            background: #ea4335;
-        }}
-
-        .channel-badge.BRANCH {{
-            background: #fbbc04;
-            color: #333;
-        }}
-
-        .event-type {{
-            font-weight: 500;
-            color: #333;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .event-type {{
-                color: #e0e0e0;
-            }}
-        }}
-
-        .event-meta {{
-            font-size: 12px;
-            color: #666;
-            margin-top: 4px;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .event-meta {{
-                color: #999;
-            }}
-        }}
+        .event-meta {{ font-size: 12px; color: var(--ink-soft); }}
+        .event-meta code {{ font-family: var(--font-mono); font-size: 11px; }}
 
         .flag {{
             display: inline-block;
-            padding: 2px 6px;
-            margin-left: 4px;
-            border-radius: 2px;
-            font-size: 11px;
-            font-weight: 600;
+            padding: 2px 7px;
+            border-radius: 3px;
+            font-size: 10.5px;
+            font-weight: 700;
         }}
 
-        .flag.resolved {{
-            background: #d4edda;
-            color: #155724;
-        }}
+        .flag.resolved {{ background: var(--resolved-soft); color: var(--resolved); }}
+        .flag.human {{ background: var(--brand-soft); color: var(--brand); }}
 
-        @media (prefers-color-scheme: dark) {{
-            .flag.resolved {{
-                background: #2d5a3a;
-                color: #5dd98b;
-            }}
-        }}
-
-        .flag.human {{
-            background: #cfe2ff;
-            color: #084298;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .flag.human {{
-                background: #2d4563;
-                color: #5d9eff;
-            }}
-        }}
-
-        /* Audit */
         .audit-event {{
-            margin-bottom: 30px;
-            padding: 15px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            background: #fafafa;
+            margin-bottom: 22px;
+            padding: 16px 18px;
+            border: 1px solid var(--rule);
+            border-radius: 6px;
+            background: var(--paper-raised);
         }}
 
-        @media (prefers-color-scheme: dark) {{
-            .audit-event {{
-                background: #2a2a2a;
-                border-color: #444;
-            }}
-        }}
+        .audit-header {{ font-weight: 700; margin-bottom: 4px; }}
+        .audit-header code {{ font-family: var(--font-mono); font-size: 12px; font-weight: 400; color: var(--ink-soft); }}
 
-        .audit-header {{
-            font-weight: 600;
-            margin-bottom: 10px;
-            color: #333;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .audit-header {{
-                color: #e0e0e0;
-            }}
-        }}
-
-        .edge-list {{
-            padding-left: 20px;
-        }}
-
-        .edge {{
-            padding: 8px 0;
-            border-bottom: 1px solid #e0e0e0;
-            font-size: 13px;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .edge {{
-                border-bottom-color: #444;
-            }}
-        }}
-
-        .edge:last-child {{
-            border-bottom: none;
-        }}
+        .edge {{ padding: 10px 0; border-top: 1px solid var(--rule); font-size: 13px; }}
+        .edge:first-of-type {{ border-top: none; }}
 
         .edge-type {{
             display: inline-block;
-            padding: 2px 6px;
-            border-radius: 2px;
-            font-size: 11px;
-            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 10.5px;
+            font-weight: 700;
             margin-right: 8px;
         }}
 
-        .edge-type.deterministic {{
-            background: #d4edda;
-            color: #155724;
-        }}
+        .edge-type.deterministic {{ background: var(--resolved-soft); color: var(--resolved); }}
+        .edge-type.probabilistic {{ background: var(--queue-soft); color: var(--queue); }}
+        .edge-type.tiebreaker {{ background: var(--normal-soft); color: var(--normal); }}
 
-        @media (prefers-color-scheme: dark) {{
-            .edge-type.deterministic {{
-                background: #2d5a3a;
-                color: #5dd98b;
-            }}
-        }}
+        .edge-plain {{ margin-top: 5px; color: var(--ink); }}
+        .edge-tech {{ margin-top: 4px; font-size: 11.5px; color: var(--ink-soft); font-family: var(--font-mono); }}
 
-        .edge-type.probabilistic {{
-            background: #fff3cd;
-            color: #856404;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .edge-type.probabilistic {{
-                background: #5c4e2e;
-                color: #fbbf24;
-            }}
-        }}
-
-        .edge-type.tiebreaker {{
-            background: #e0e0e0;
-            color: #666;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .edge-type.tiebreaker {{
-                background: #444;
-                color: #999;
-            }}
-        }}
-
-        .edge-signal {{
-            display: inline-block;
-            color: #0066cc;
-            font-weight: 500;
-            margin: 0 4px;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .edge-signal {{
-                color: #66b3ff;
-            }}
-        }}
-
-        .edge-confidence {{
-            font-size: 12px;
-            color: #666;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .edge-confidence {{
-                color: #999;
-            }}
-        }}
-
-        .edge-reason {{
-            font-size: 12px;
-            color: #666;
-            margin-top: 4px;
-            padding-left: 6px;
-            border-left: 2px solid #ddd;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .edge-reason {{
-                color: #999;
-                border-left-color: #555;
-            }}
-        }}
-
-        .no-data {{
-            color: #999;
-            text-align: center;
-            padding: 20px;
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            .no-data {{
-                color: #666;
-            }}
-        }}
+        .no-data {{ color: var(--ink-soft); text-align: center; padding: 30px; font-size: 13.5px; }}
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>Amex Identity Resolution Analyst Dashboard</h1>
-        <div class="header-info" id="headerInfo">
-            Loading...
-        </div>
+    <div class="page">
+        <header class="masthead">
+            <div class="eyebrow">Cross-Channel Journey Stitching &mdash; Internal Case Review</div>
+            <h1>Case Review Dashboard</h1>
+            <p class="mission">
+                Every card member's activity across app, web, phone, and branch, stitched into one
+                story. Use this to find where an experience broke down, see a customer's full
+                history before you call them back, and check why the system believes two
+                interactions are the same person.
+            </p>
+            <details class="legend">
+                <summary>How to read this</summary>
+                <dl class="legend-grid">
+                    <div>
+                        <dt>Risk score</dt>
+                        <dd>0&ndash;100, combining how many times a customer switched channels,
+                        how long the issue has been open, repeat phone contact, and whether it's
+                        resolved. Above 65 enters the review queue; above 85 triggers an alert.</dd>
+                    </div>
+                    <div>
+                        <dt>Case ID vs. raw ID</dt>
+                        <dd>"Case #12" is a friendly label for this dashboard. The
+                        <code style="font-family:var(--font-mono)">CONFIRMED-EVT-&hellip;</code> code
+                        beneath it is the system's actual identifier &mdash; use it if you need to
+                        cross-reference elsewhere.</dd>
+                    </div>
+                    <div>
+                        <dt>Identity Merge Audit</dt>
+                        <dd>Shows why the system believes two interactions belong to the same
+                        person. "Deterministic" means certain (same account login, phone number
+                        on file, etc). "Probabilistic" means likely, not certain. "Tiebreaker"
+                        (e.g. shared IP address) is recorded for reference only &mdash; it never
+                        merges two people on its own, since a shared home network isn't proof of
+                        identity.</dd>
+                    </div>
+                </dl>
+            </details>
+        </header>
 
-        <div class="tabs">
-            <button class="tab-button active" onclick="switchTab(event, 'queue')">
-                SLA / Escalation Queue
-            </button>
-            <button class="tab-button" onclick="switchTab(event, 'timeline')">
-                Per-Member Timeline
-            </button>
-            <button class="tab-button" onclick="switchTab(event, 'audit')">
-                Identity Merge Audit
-            </button>
-        </div>
+        <nav class="tabs">
+            <button class="tab-button active" onclick="switchTab(event, 'queue')">Review Queue</button>
+            <button class="tab-button" onclick="switchTab(event, 'timeline')">Customer Story</button>
+            <button class="tab-button" onclick="switchTab(event, 'audit')">Identity Merge Audit</button>
+        </nav>
 
-        <!-- Queue View -->
         <div id="queue" class="view active">
-            <div class="queue-controls">
-                <input type="text" id="queueSearch" placeholder="Search confirmed ID..."
-                       onkeyup="filterQueue()">
-                <label>
+            <p class="view-intro" id="queueIntro">Loading&hellip;</p>
+            <div class="controls">
+                <input type="text" id="queueSearch" placeholder="Search case or ID&hellip;" onkeyup="filterQueue()">
+                <label class="check">
                     <input type="checkbox" id="showAll" onchange="filterQueue()">
-                    Show all (including normal)
+                    Show everyone, not just flagged cases
                 </label>
             </div>
             <table id="queueTable">
                 <thead>
                     <tr>
-                        <th onclick="sortQueue('confirmed_id')">Confirmed ID</th>
-                        <th onclick="sortQueue('score')" style="text-align: right;">Score</th>
-                        <th onclick="sortQueue('classification')">Classification</th>
-                        <th>Channels</th>
-                        <th>Last Event</th>
+                        <th onclick="sortQueue('case_number')">Case</th>
+                        <th onclick="sortQueue('score')">Risk</th>
+                        <th>Status</th>
+                        <th>Channels touched</th>
+                        <th>Last activity</th>
                         <th>Resolved</th>
                     </tr>
                 </thead>
-                <tbody id="queueBody">
-                </tbody>
+                <tbody id="queueBody"></tbody>
             </table>
         </div>
 
-        <!-- Timeline View -->
         <div id="timeline" class="view">
-            <div class="timeline-controls">
-                <label>Select member:
+            <p class="view-intro">Every event for one customer, in order, across all four channels &mdash; the single story a case is scattered pieces of everywhere else.</p>
+            <div class="controls">
+                <label>Select a case:
                     <select id="memberSelect" onchange="showTimeline()">
-                        <option value="">-- Select a member --</option>
+                        <option value="">&mdash; choose a case &mdash;</option>
                     </select>
                 </label>
             </div>
             <div id="timelineContent"></div>
         </div>
 
-        <!-- Audit View -->
         <div id="audit" class="view">
-            <div class="timeline-controls">
-                <label>Select member:
+            <p class="view-intro">For each interaction in a case, every reason the system linked it to another &mdash; so you can verify the match, not just trust it.</p>
+            <div class="controls">
+                <label>Select a case:
                     <select id="auditMemberSelect" onchange="showAudit()">
-                        <option value="">-- Select a member --</option>
+                        <option value="">&mdash; choose a case &mdash;</option>
                     </select>
                 </label>
             </div>
@@ -816,33 +653,24 @@ def generate_html(data):
         let queueSortAscending = false;
 
         function switchTab(event, tabName) {{
-            // Hide all views
             document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
             document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
-
-            // Show selected view and mark button active
             document.getElementById(tabName).classList.add('active');
             event.target.classList.add('active');
-
-            // Initialize view data
-            if (tabName === 'queue') {{
-                initQueue();
-            }} else if (tabName === 'timeline') {{
-                initTimeline();
-            }} else if (tabName === 'audit') {{
-                initAudit();
-            }}
+            if (tabName === 'queue') initQueue();
+            else if (tabName === 'timeline') initTimeline();
+            else if (tabName === 'audit') initAudit();
         }}
 
         function initQueue() {{
-            const header = document.getElementById('headerInfo');
-            header.innerHTML = `Total members: ${{DATA.summary.total_members}} |
-                Alerts: ${{DATA.summary.alerts}} |
-                Queue: ${{DATA.summary.queue}} |
-                Normal: ${{DATA.summary.normal}}`;
-
+            const flagged = DATA.summary.alerts + DATA.summary.queue;
+            document.getElementById('queueIntro').textContent =
+                `${{DATA.summary.total_members}} cases total. ${{flagged}} need review right now `+
+                `(${{DATA.summary.alerts}} at alert level, ${{DATA.summary.queue}} in the queue).`;
             filterQueue();
         }}
+
+        function scoreOf(member) {{ return member.escalation.score; }}
 
         function filterQueue() {{
             const search = document.getElementById('queueSearch').value.toLowerCase();
@@ -850,44 +678,48 @@ def generate_html(data):
             const tbody = document.getElementById('queueBody');
             tbody.innerHTML = '';
 
-            let rows = [];
-            DATA.members.forEach(member => {{
-                const classification = member.escalation.classification;
-                if (!showAll && classification === 'normal') return;
-
-                if (search && !member.confirmed_id.toLowerCase().includes(search)) return;
-
-                rows.push(member);
-            }});
-
-            // Apply current sort
-            rows.sort((a, b) => {{
-                let aVal = a.escalation[queueSortField] ?? a[queueSortField];
-                let bVal = b.escalation[queueSortField] ?? b[queueSortField];
-
-                if (typeof aVal === 'string') {{
-                    return queueSortAscending ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
-                }} else {{
-                    return queueSortAscending ? aVal - bVal : bVal - aVal;
+            let rows = DATA.members.filter(m => {{
+                if (!showAll && m.escalation.classification === 'normal') return false;
+                if (search) {{
+                    const hay = (`case ${{m.case_number}} ${{m.confirmed_id}}`).toLowerCase();
+                    if (!hay.includes(search)) return false;
                 }}
+                return true;
             }});
+
+            rows.sort((a, b) => {{
+                let aVal = queueSortField === 'score' ? scoreOf(a) : a[queueSortField];
+                let bVal = queueSortField === 'score' ? scoreOf(b) : b[queueSortField];
+                return queueSortAscending ? aVal - bVal : bVal - aVal;
+            }});
+
+            if (rows.length === 0) {{
+                tbody.innerHTML = '<tr><td colspan="6" class="no-data">No cases match. Try "Show everyone."</td></tr>';
+                return;
+            }}
 
             rows.forEach(member => {{
-                const row = document.createElement('tr');
-                const score = member.escalation.score.toFixed(1);
-                const classification = member.escalation.classification;
-                const channels = new Set(member.timeline.map(e => e.channel));
+                const cls = member.escalation.classification;
+                const score = member.escalation.score;
+                const channels = [...new Set(member.timeline.map(e => e.channel))];
                 const lastEvent = member.timeline[member.timeline.length - 1];
                 const resolved = member.timeline.some(e => e.resolved) ? 'Yes' : 'No';
 
+                const row = document.createElement('tr');
+                row.onclick = () => clickMember(member.confirmed_id);
                 row.innerHTML = `
-                    <td style="cursor: pointer; color: #0066cc;"
-                        onclick="clickMember('${{member.confirmed_id}}')">
-                        ${{member.confirmed_id}}
+                    <td>
+                        <span class="case-id">Case #${{member.case_number}}</span>
+                        <span class="raw-id">${{member.confirmed_id}}</span>
                     </td>
-                    <td style="text-align: right; font-weight: 600;">${{score}}</td>
-                    <td><span class="badge ${{classification}}">${{classification.toUpperCase()}}</span></td>
-                    <td>${{Array.from(channels).join(', ')}}</td>
+                    <td class="gauge-cell">
+                        <div class="gauge-track">
+                            <div class="gauge-marker ${{cls}}" style="left:${{score}}%"></div>
+                        </div>
+                        <span class="gauge-score">${{score.toFixed(1)}} / 100</span>
+                    </td>
+                    <td><span class="badge ${{cls}}">${{cls.toUpperCase()}}</span></td>
+                    <td>${{channels.map(c => `<span class="channel-pill ${{c}}">${{c}}</span>`).join('')}}</td>
                     <td>${{new Date(lastEvent.timestamp_str).toLocaleString()}}</td>
                     <td>${{resolved}}</td>
                 `;
@@ -896,156 +728,123 @@ def generate_html(data):
         }}
 
         function sortQueue(field) {{
-            if (queueSortField === field) {{
-                queueSortAscending = !queueSortAscending;
-            }} else {{
-                queueSortField = field;
-                queueSortAscending = false;
-            }}
+            if (queueSortField === field) {{ queueSortAscending = !queueSortAscending; }}
+            else {{ queueSortField = field; queueSortAscending = false; }}
             filterQueue();
         }}
 
         function clickMember(confirmedId) {{
-            // Switch to timeline view and select member
             document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
             document.querySelectorAll('.tab-button').forEach(b => b.classList.remove('active'));
             document.getElementById('timeline').classList.add('active');
             document.querySelectorAll('.tab-button')[1].classList.add('active');
-
-            initTimeline();  // dropdown is only populated on tab-switch via switchTab(); this
-                              // bypasses switchTab(), so populate it explicitly before selecting
+            initTimeline();  // dropdown only populates on tab-switch; this bypasses that, so do it first
             document.getElementById('memberSelect').value = confirmedId;
             showTimeline();
         }}
 
-        function initTimeline() {{
-            const select = document.getElementById('memberSelect');
-            select.innerHTML = '<option value="">-- Select a member --</option>';
-            DATA.members.forEach(member => {{
+        function populateSelect(select) {{
+            select.innerHTML = '<option value="">&mdash; choose a case &mdash;</option>';
+            DATA.members.forEach(m => {{
                 const opt = document.createElement('option');
-                opt.value = member.confirmed_id;
-                opt.text = member.confirmed_id;
+                opt.value = m.confirmed_id;
+                opt.text = `Case #${{m.case_number}} (${{m.escalation.classification}}, score ${{m.escalation.score.toFixed(0)}})`;
                 select.appendChild(opt);
             }});
         }}
 
+        function initTimeline() {{ populateSelect(document.getElementById('memberSelect')); }}
+        function initAudit() {{ populateSelect(document.getElementById('auditMemberSelect')); }}
+
         function showTimeline() {{
             const confirmedId = document.getElementById('memberSelect').value;
             const content = document.getElementById('timelineContent');
-
-            if (!confirmedId) {{
-                content.innerHTML = '<div class="no-data">Select a member to view timeline</div>';
-                return;
-            }}
+            if (!confirmedId) {{ content.innerHTML = '<div class="no-data">Choose a case above to see its story.</div>'; return; }}
 
             const member = DATA.members.find(m => m.confirmed_id === confirmedId);
-            if (!member) {{
-                content.innerHTML = '<div class="no-data">Member not found</div>';
-                return;
-            }}
+            const cls = member.escalation.classification;
 
-            let html = `<div style="margin-bottom: 15px; padding: 12px; background: #f5f5f5; border-radius: 4px;">
-                <strong>${{member.confirmed_id}}</strong> |
-                Score: <span style="font-weight: 600;">${{member.escalation.score.toFixed(1)}}</span> |
-                Classification: <span class="badge ${{member.escalation.classification}}">${{member.escalation.classification.toUpperCase()}}</span>
+            let html = `<div class="case-header">
+                <div class="case-title">Case #${{member.case_number}} <span class="badge ${{cls}}">${{cls.toUpperCase()}}</span></div>
+                <span class="raw-id">${{member.confirmed_id}}</span>
+                <p class="reason">${{member.escalation.reason_text}}</p>
             </div>`;
 
             html += '<div class="timeline">';
             member.timeline.forEach(event => {{
                 const resolved = event.resolved ? '<span class="flag resolved">RESOLVED</span>' : '';
                 const human = event.human_agent ? '<span class="flag human">HUMAN AGENT</span>' : '';
-
                 html += `
                     <div class="timeline-event ${{event.channel}}">
-                        <div class="timeline-content">
+                        <div>
                             <div class="timeline-header">
-                                <span class="channel-badge ${{event.channel}}">${{event.channel}}</span>
-                                <span class="event-type">${{event.event_type}}</span>
+                                <span class="channel-pill ${{event.channel}}">${{event.channel}}</span>
+                                <span class="event-type">${{event.event_type.replaceAll('_', ' ')}}</span>
                                 ${{resolved}}${{human}}
                             </div>
                             <div class="event-meta">
-                                ${{new Date(event.timestamp_str).toLocaleString()}}
-                                <br>Event ID: <code>${{event.event_id}}</code>
+                                ${{new Date(event.timestamp_str).toLocaleString()}} &middot; <code>${{event.event_id}}</code>
                             </div>
                         </div>
                     </div>
                 `;
             }});
             html += '</div>';
-
             content.innerHTML = html;
         }}
 
-        function initAudit() {{
-            const select = document.getElementById('auditMemberSelect');
-            select.innerHTML = '<option value="">-- Select a member --</option>';
-            DATA.members.forEach(member => {{
-                const opt = document.createElement('option');
-                opt.value = member.confirmed_id;
-                opt.text = member.confirmed_id;
-                select.appendChild(opt);
-            }});
-        }}
+        const EDGE_PLAIN = {{
+            deterministic: 'Certain match',
+            probabilistic: 'Likely match',
+            tiebreaker: 'Reference only \\u2014 never merges identities on its own',
+        }};
+
+        const SIGNAL_PLAIN = {{
+            membership_rewards_id: 'same account login',
+            ani: 'same phone number on file',
+            card_id: 'same card presented',
+            dispute_ref: 'same case reference number',
+            device_fingerprint: 'same device',
+            email_hash: 'same email on file',
+            ip: 'same network/IP address',
+        }};
 
         function showAudit() {{
             const confirmedId = document.getElementById('auditMemberSelect').value;
             const content = document.getElementById('auditContent');
-
-            if (!confirmedId) {{
-                content.innerHTML = '<div class="no-data">Select a member to view audit</div>';
-                return;
-            }}
+            if (!confirmedId) {{ content.innerHTML = '<div class="no-data">Choose a case above to see its identity links.</div>'; return; }}
 
             const member = DATA.members.find(m => m.confirmed_id === confirmedId);
-            if (!member) {{
-                content.innerHTML = '<div class="no-data">Member not found</div>';
-                return;
-            }}
-
-            let html = `<div style="margin-bottom: 15px; padding: 12px; background: #f5f5f5; border-radius: 4px;">
-                <strong>${{member.confirmed_id}}</strong> |
-                ${{member.audit.length}} events in this member's journey
+            let html = `<div class="case-header" style="margin-bottom:18px;">
+                <div class="case-title">Case #${{member.case_number}}</div>
+                <span class="raw-id">${{member.confirmed_id}} &middot; ${{member.audit.length}} interactions</span>
             </div>`;
 
-            html += '<div class="audit-list">';
             member.audit.forEach(auditEvent => {{
-                html += `<div class="audit-event">
-                    <div class="audit-header">Event: ${{auditEvent.event_id}}</div>`;
-
+                html += `<div class="audit-event"><div class="audit-header">Interaction <code>${{auditEvent.event_id}}</code></div>`;
                 if (auditEvent.linked_to.length === 0) {{
-                    html += '<div class="edge-list"><div class="no-data">No identity links</div></div>';
+                    html += '<div class="no-data" style="padding:10px 0;">No identity links found for this interaction.</div>';
                 }} else {{
-                    html += '<div class="edge-list">';
                     auditEvent.linked_to.forEach(link => {{
                         const typeClass = link.edge_type.toLowerCase();
+                        const plain = EDGE_PLAIN[typeClass] || link.edge_type;
+                        const signalPlain = SIGNAL_PLAIN[link.signal] || link.signal;
                         html += `
                             <div class="edge">
                                 <span class="edge-type ${{typeClass}}">${{link.edge_type.toUpperCase()}}</span>
-                                ${{typeClass === 'tiebreaker' ? '<span class="edge-confidence">(audit only -- never merges identities)</span> ' : ''}}
-                                <strong>${{link.other_event_id}}</strong>
-                                (<span class="channel-badge ${{link.other_channel}}">${{link.other_channel}}</span>
-                                ${{link.other_event_type}})
-                                <div class="edge-confidence">
-                                    Signal: <span class="edge-signal">${{link.signal}}</span> |
-                                    Confidence: ${{(link.confidence * 100).toFixed(0)}}%
-                                </div>
-                                <div class="edge-reason">
-                                    ${{link.reason}}
-                                </div>
+                                <span class="channel-pill ${{link.other_channel}}">${{link.other_channel}}</span>
+                                linked to <code>${{link.other_event_id}}</code>
+                                <div class="edge-plain">${{plain}} &mdash; ${{signalPlain}} (${{(link.confidence * 100).toFixed(0)}}% confidence)</div>
+                                <div class="edge-tech">${{link.reason}}</div>
                             </div>
                         `;
                     }});
-                    html += '</div>';
                 }}
-
                 html += '</div>';
             }});
-            html += '</div>';
-
             content.innerHTML = html;
         }}
 
-        // Initialize on load
         document.addEventListener('DOMContentLoaded', initQueue);
     </script>
 </body>
