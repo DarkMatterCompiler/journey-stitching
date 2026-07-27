@@ -12,9 +12,8 @@ changes with it. See DESIGN.md "Demo narrative" for the write-up this
 script exists to justify.
 """
 
-from analytics import escalation_breakdown, classify_escalation
+from analytics import escalation_breakdown, classify_escalation, explain_score
 from eval_actionability import run_chaos_eval
-from export_snapshot import explain_score
 from generate_data import generate
 from models import Event
 from pipeline import run_pipeline, run_streaming_pipeline
@@ -45,11 +44,14 @@ def build_sarah_events(base_t):
     return [app_fail, call_in]
 
 
-def scene_1(background_events, base_t):
-    print("=" * 70)
-    print("SCENE 1: Sarah calls in")
-    print("=" * 70)
-    print("""
+def scene_1(background_events, base_t, verbose=True):
+    """Computes Scene 1 and returns its data; prints the narrated version if verbose.
+    Single source of truth for both the CLI script and the dashboard export."""
+    if verbose:
+        print("=" * 70)
+        print("SCENE 1: Sarah calls in")
+        print("=" * 70)
+        print("""
 Sarah is traveling. She opens the Amex app to dispute a $200 charge she
 doesn't recognize -- her connection drops mid-submission. A minute and a
 half later, she calls support.
@@ -62,25 +64,32 @@ half later, she calls support.
     graph, confirmed_timelines, analytics_timelines = run_pipeline(all_events)
     sarah_confirmed_id = sarah_events[0].confirmed_id
     linked = sarah_events[1].confirmed_id == sarah_confirmed_id
-    print(f"Identity resolution: app event and call event -> "
-          f"{'SAME case (' + sarah_confirmed_id + ')' if linked else 'NOT linked -- see below'}")
+    if verbose:
+        print(f"Identity resolution: app event and call event -> "
+              f"{'SAME case (' + sarah_confirmed_id + ')' if linked else 'NOT linked -- see below'}")
     if not linked:
-        print("  (unexpected -- would mean the dispute_ref match failed; not the intended demo state)")
-        return
+        if verbose:
+            print("  (unexpected -- would mean the dispute_ref match failed; not the intended demo state)")
+        return None
 
     edges = [e for e in graph.edges_for("EVT-SARAH-1") if e.v == "EVT-SARAH-2" or e.u == "EVT-SARAH-2"]
-    for edge in edges:
-        print(f"  linked via: {edge.type} / {edge.signal} (confidence {edge.confidence:.0%}) -- {edge.reason}")
+    edges_data = [{"type": e.type, "signal": e.signal, "confidence": e.confidence, "reason": e.reason}
+                  for e in edges]
+    if verbose:
+        for e in edges_data:
+            print(f"  linked via: {e['type']} / {e['signal']} (confidence {e['confidence']:.0%}) -- {e['reason']}")
 
     # real-time serving latency: is her app event queryable before she finishes dialing?
-    print("\nReal-time serving layer check:")
+    if verbose:
+        print("\nReal-time serving layer check:")
     result = run_streaming_pipeline(background_events + [sarah_events[0]])
-    sarah_latency = next(((sunk - enq) * 1000 for eid, enq, sunk in result["event_latencies"]
-                           if eid == "EVT-SARAH-1"), None)
-    if sarah_latency is not None:
-        print(f"  her app-fail event became queryable in the KV store {sarah_latency:.1f}ms after it happened")
-        print(f"  she calls {90}s later -- her context has been sitting there "
-              f"for {90 - sarah_latency / 1000:.1f}s by the time the call connects")
+    latency_ms = next(((sunk - enq) * 1000 for eid, enq, sunk in result["event_latencies"]
+                        if eid == "EVT-SARAH-1"), None)
+    wait_seconds = 90
+    if verbose and latency_ms is not None:
+        print(f"  her app-fail event became queryable in the KV store {latency_ms:.1f}ms after it happened")
+        print(f"  she calls {wait_seconds}s later -- her context has been sitting there "
+              f"for {wait_seconds - latency_ms / 1000:.1f}s by the time the call connects")
 
     # escalation score at the moment the call connects -- BEFORE resolution
     sarah_journey = sorted([e for e in all_events if e.confirmed_id == sarah_confirmed_id],
@@ -88,9 +97,11 @@ half later, she calls support.
     breakdown = escalation_breakdown(sarah_journey)
     score = breakdown["score"]
     classification = classify_escalation(score)
-    print(f"\nEscalation score at the moment she calls: {score:.1f} ({classification.upper()})")
-    print(f"  {explain_score(breakdown, classification)}")
-    print("""
+    reason_text = explain_score(breakdown, classification)
+    if verbose:
+        print(f"\nEscalation score at the moment she calls: {score:.1f} ({classification.upper()})")
+        print(f"  {reason_text}")
+        print("""
 The score is NOT dramatic here -- and that's correct, not a shortfall. The
 formula rewards accumulated risk (repeat contacts, elapsed unresolved time);
 a case that's one channel-switch old hasn't accumulated any yet. The thing
@@ -103,14 +114,28 @@ instead of asking her to repeat everything from scratch. That's the
 real-time KV lookup + deterministic dispute_ref linking working exactly as
 designed (DESIGN.md Sec.4-5) -- not the escalation score.
 """)
-    return sarah_confirmed_id
+
+    return {
+        "confirmed_id": sarah_confirmed_id,
+        "timeline": [{"event_id": e.event_id, "channel": e.channel, "event_type": e.event_type,
+                      "timestamp": e.timestamp, "resolved": e.resolved, "human_agent": e.human_agent}
+                     for e in sarah_journey],
+        "edges": edges_data,
+        "latency_ms": latency_ms,
+        "wait_seconds": wait_seconds,
+        "score": score,
+        "classification": classification,
+        "reason_text": reason_text,
+    }
 
 
-def scene_2(background_events):
-    print("=" * 70)
-    print("SCENE 2: the pattern behind the Sarahs who AREN'T saved on the first call")
-    print("=" * 70)
-    print("""
+def scene_2(background_events, verbose=True):
+    """Computes Scene 2 and returns its data; prints the narrated version if verbose."""
+    if verbose:
+        print("=" * 70)
+        print("SCENE 2: the pattern behind the Sarahs who AREN'T saved on the first call")
+        print("=" * 70)
+        print("""
 Sarah's own two-event journey is too short and too quickly staffed by a
 human agent to register as a risk pattern on its own. But she isn't the
 only card member whose app dispute fails and who then calls -- some of
@@ -118,8 +143,9 @@ those calls DON'T get resolved on the first contact. That's the aggregate
 pattern the same pipeline surfaces automatically, using the actual
 chaos-injection eval already built for this system (eval_actionability.py):
 """)
-    run_chaos_eval(background_members=len(background_events) // 3)
-    print("""
+    chaos_result = run_chaos_eval(background_members=len(background_events) // 3)
+    if verbose:
+        print("""
 Translated: every card member who hits APP_DISPUTE_SUBMIT_FAIL and then
 calls shares Sarah's opening two steps. The ones who get a Sarah-style
 first-contact resolution never accumulate risk. The ones who don't --
@@ -129,6 +155,14 @@ That's the handoff from Scene 1 to Scene 2: the same event that made
 Sarah's call effortless is the event a product team can now see, at scale,
 is failing customers before it reaches 10,000 of them.
 """)
+    return chaos_result
+
+
+def compute_demo_data(background_events, base_t):
+    """Non-printing entry point for embedding the demo in the dashboard export."""
+    scene1 = scene_1(background_events, base_t, verbose=False)
+    scene2 = scene_2(background_events, verbose=False)
+    return {"scene1": scene1, "scene2": scene2}
 
 
 if __name__ == "__main__":

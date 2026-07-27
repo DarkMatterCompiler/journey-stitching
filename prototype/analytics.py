@@ -77,6 +77,46 @@ def classify_escalation(score):
         return "normal"
 
 
+def explain_score(breakdown, classification):
+    """Plain-English sentence for why a case scored the way it did -- the
+    breakdown components (C/T/R/res/P) mean nothing to an analyst on sight,
+    so this is what actually answers "why am I looking at this case."
+    """
+    switches = breakdown["switches"]
+    repeat_calls = breakdown["repeat_calls"]
+    hours = breakdown["hours"]
+    resolved = breakdown["res"] >= 1.0
+
+    clauses = []
+    if switches >= 2:
+        clauses.append(f"switched channels {switches} times")
+    if repeat_calls >= 1:
+        times = "time" if repeat_calls == 1 else "times"
+        clauses.append(f"called back {repeat_calls} {times} after the first contact")
+    if not resolved:
+        clauses.append(f"is still unresolved after {hours / 24:.1f} days" if hours >= 24
+                        else "is still unresolved")
+    elif hours >= 24:
+        clauses.append(f"took {hours / 24:.1f} days to resolve")
+
+    if not clauses:
+        return "Single-channel activity, resolved without any repeat contact."
+
+    if len(clauses) == 1:
+        body = clauses[0]
+    elif len(clauses) == 2:
+        body = f"{clauses[0]} and {clauses[1]}"
+    else:
+        body = ", ".join(clauses[:-1]) + f", and {clauses[-1]}"
+
+    prefix = {
+        "alert": "Escalated because this customer",
+        "queue": "Flagged for review because this customer",
+        "normal": "This customer",
+    }[classification]
+    return f"{prefix} {body}."
+
+
 def journey_bad_outcome(journey):
     """
     Determine if a journey has a bad outcome.

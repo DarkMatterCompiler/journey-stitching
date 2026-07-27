@@ -99,7 +99,21 @@ def run_chaos_eval(n_cohort=500, n_control=500, background_members=3000):
     print(f"  control avg score={control_avg:.1f}  ({control_queued}/{len(control_scores)} entered queue/alert)")
     print(f"  separation check: {'PASS' if cohort_avg > control_avg + 20 else 'FAIL'}")
 
-    return {"patterns_found": len(patterns), "cohort_avg": cohort_avg, "control_avg": control_avg}
+    top = max(cohort_specific, key=lambda p: p["lift"]) if cohort_specific else None
+    return {
+        "patterns_found": len(patterns),
+        "prefix_lift": prefix_hit["lift"] if prefix_hit else None,
+        "top_pattern": top["pattern"] if top else None,
+        "top_lift": top["lift"] if top else None,
+        "top_bad_support": top["bad_support"] if top else None,
+        "top_good_support": top["good_support"] if top else None,
+        "cohort_avg": cohort_avg,
+        "control_avg": control_avg,
+        "cohort_queued": cohort_queued,
+        "cohort_total": len(cohort_scores),
+        "control_queued": control_queued,
+        "control_total": len(control_scores),
+    }
 
 
 def run_alert_tier_demo(n=20):

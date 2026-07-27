@@ -11,52 +11,13 @@ from datetime import datetime, timezone
 
 from generate_data import generate
 from pipeline import run_pipeline
-from analytics import escalation_score, escalation_breakdown, classify_escalation
+from analytics import escalation_score, escalation_breakdown, classify_escalation, explain_score
+from demo_sarah import compute_demo_data
 
 
 def format_timestamp(epoch_seconds):
     """Convert epoch seconds to ISO 8601 string for display."""
     return datetime.fromtimestamp(epoch_seconds, tz=timezone.utc).isoformat().replace("+00:00", "Z")
-
-
-def explain_score(breakdown, classification):
-    """Plain-English sentence for why a case scored the way it did -- the
-    breakdown components (C/T/R/res/P) mean nothing to an analyst on sight,
-    so this is what actually answers "why am I looking at this case."
-    """
-    switches = breakdown["switches"]
-    repeat_calls = breakdown["repeat_calls"]
-    hours = breakdown["hours"]
-    resolved = breakdown["res"] >= 1.0
-
-    clauses = []
-    if switches >= 2:
-        clauses.append(f"switched channels {switches} times")
-    if repeat_calls >= 1:
-        times = "time" if repeat_calls == 1 else "times"
-        clauses.append(f"called back {repeat_calls} {times} after the first contact")
-    if not resolved:
-        clauses.append(f"is still unresolved after {hours / 24:.1f} days" if hours >= 24
-                        else "is still unresolved")
-    elif hours >= 24:
-        clauses.append(f"took {hours / 24:.1f} days to resolve")
-
-    if not clauses:
-        return "Single-channel activity, resolved without any repeat contact."
-
-    if len(clauses) == 1:
-        body = clauses[0]
-    elif len(clauses) == 2:
-        body = f"{clauses[0]} and {clauses[1]}"
-    else:
-        body = ", ".join(clauses[:-1]) + f", and {clauses[-1]}"
-
-    prefix = {
-        "alert": "Escalated because this customer",
-        "queue": "Flagged for review because this customer",
-        "normal": "This customer",
-    }[classification]
-    return f"{prefix} {body}."
 
 
 def build_export_dict(graph, confirmed_timelines, events):
@@ -150,8 +111,11 @@ def main():
     print(f"  Queue (65 < score <= 85): {summary['queue']}")
     print(f"  Normal (score <= 65): {summary['normal']}")
 
+    print("Computing demo narrative (Sarah's story)...")
+    demo_data = compute_demo_data(events, base_t=1_700_500_000.0)
+
     output_path = "analyst_dashboard.html"
-    html_content = generate_html(export_data)
+    html_content = generate_html(export_data, demo_data)
 
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html_content)
@@ -161,7 +125,134 @@ def main():
     print(f"Open in browser: file://{abs_path.replace(chr(92), '/')}")
 
 
-def generate_html(data):
+def render_demo_html(demo):
+    """Server-render Sarah's story tab. Not JSON+JS like the other tabs --
+    this is one fixed case, not filterable/sortable data, so there's nothing
+    JS needs to do here that Python can't do once at export time.
+    """
+    if not demo or not demo.get("scene1"):
+        return '<div class="no-data">Demo data unavailable -- see demo_sarah.py.</div>'
+
+    s1, s2 = demo["scene1"], demo["scene2"]
+    early_by = s1["wait_seconds"] - s1["latency_ms"] / 1000
+
+    edge_rows = "".join(f"""
+        <div class="demo-edge">
+            <span class="edge-type {e['type']}">{e['type'].upper()}</span>
+            <span class="demo-edge-signal">{e['signal'].replace('_', ' ')}</span>
+            <span class="demo-edge-conf">{e['confidence']:.0%} confidence</span>
+        </div>""" for e in s1["edges"])
+
+    timeline_rows = "".join(f"""
+        <div class="timeline-event {e['channel']}">
+            <div>
+                <div class="timeline-header">
+                    <span class="channel-pill {e['channel']}">{e['channel']}</span>
+                    <span class="event-type">{e['event_type'].replace('_', ' ')}</span>
+                    {'<span class="flag human">HUMAN AGENT</span>' if e['human_agent'] else ''}
+                </div>
+                <div class="event-meta"><code>{e['event_id']}</code></div>
+            </div>
+        </div>""" for e in s1["timeline"])
+
+    cls = s1["classification"]
+    prefix_lift_text = (f"{s2['prefix_lift']:.1f}x" if s2.get("prefix_lift") else "below threshold")
+    top_pattern_text = " → ".join(f"{c}:{t}" for c, t in s2["top_pattern"]) if s2.get("top_pattern") else "n/a"
+
+    cohort_pct = min(100, s2["cohort_avg"])
+    control_pct = min(100, s2["control_avg"])
+
+    return f"""
+    <article class="demo">
+        <div class="demo-hero">
+            <div class="demo-hero-num">{s1['latency_ms']:.0f}<span class="demo-hero-unit">ms</span></div>
+            <p class="demo-hero-caption">
+                is how long it took Sarah's failed app dispute to become queryable in the
+                real-time store &mdash; <strong>{early_by:.0f} seconds before she even finished dialing.</strong>
+            </p>
+        </div>
+
+        <section class="demo-scene">
+            <div class="demo-scene-label">Scene 1 &mdash; the agent already knows</div>
+            <p class="demo-copy">
+                Sarah is traveling. She opens the Amex app to dispute a $200 charge she doesn't
+                recognize &mdash; her connection drops mid-submission. Ninety seconds later, she
+                calls support.
+            </p>
+
+            <blockquote class="demo-quote">
+                &ldquo;Hi Sarah &mdash; I see you were just trying to dispute a $200 charge on the
+                app a few seconds ago. I have the details right here. Are you safe?&rdquo;
+            </blockquote>
+
+            <div class="demo-grid">
+                <div class="demo-panel">
+                    <h4>Why the agent already knew</h4>
+                    <div class="demo-edges">{edge_rows}</div>
+                </div>
+                <div class="demo-panel">
+                    <h4>Her case, in order</h4>
+                    <div class="timeline">{timeline_rows}</div>
+                </div>
+            </div>
+
+            <div class="demo-callout">
+                <span class="badge {cls}">{cls.upper()} &middot; {s1['score']:.1f} / 100</span>
+                <p>{s1['reason_text']} The score isn't dramatic here &mdash; correctly. It rewards
+                <em>accumulated</em> risk (repeat contacts, elapsed unresolved time), and a case
+                that's one channel-switch old hasn't built any up yet. What actually changed this
+                call wasn't an alert &mdash; it was the agent having her timeline already open.</p>
+            </div>
+        </section>
+
+        <section class="demo-scene">
+            <div class="demo-scene-label">Scene 2 &mdash; the pattern behind the Sarahs who aren't saved</div>
+            <p class="demo-copy">
+                Sarah's own two-event case is too short to register as a risk pattern on its own
+                &mdash; and it shouldn't, she was helped immediately. But she isn't the only card
+                member whose app dispute fails and who then calls. Some of those calls
+                <em>don't</em> get resolved on the first try. That's the same pattern, surfacing
+                automatically, in the aggregate:
+            </p>
+
+            <div class="demo-grid">
+                <div class="demo-panel">
+                    <h4>The shared opening step</h4>
+                    <p class="demo-stat-small">{prefix_lift_text}</p>
+                    <p class="demo-stat-caption">lift for the step Sarah also took &mdash;
+                    correctly ignored, since customers who get saved share it too.</p>
+                </div>
+                <div class="demo-panel">
+                    <h4>The pattern that predicts trouble</h4>
+                    <p class="demo-stat-small alert-num">{s2['top_lift']:.0f}x</p>
+                    <p class="demo-stat-caption">lift for <code>{top_pattern_text}</code> &mdash;
+                    found in {s2['top_bad_support']:.0%} of unresolved cases, 0% of resolved ones.</p>
+                </div>
+            </div>
+
+            <div class="demo-compare">
+                <div class="demo-compare-row">
+                    <span class="demo-compare-label">Resolved on first contact</span>
+                    <div class="demo-compare-track"><div class="demo-compare-fill resolved" style="width:{control_pct}%"></div></div>
+                    <span class="demo-compare-value">{s2['control_avg']:.1f} avg &middot; {s2['control_queued']}/{s2['control_total']} queued</span>
+                </div>
+                <div class="demo-compare-row">
+                    <span class="demo-compare-label">Not resolved, repeat contact</span>
+                    <div class="demo-compare-track"><div class="demo-compare-fill alert" style="width:{cohort_pct}%"></div></div>
+                    <span class="demo-compare-value">{s2['cohort_avg']:.1f} avg &middot; {s2['cohort_queued']}/{s2['cohort_total']} queued</span>
+                </div>
+            </div>
+
+            <p class="demo-copy">
+                The same event that made Sarah's call effortless is, at scale, an event a product
+                team can now see is failing customers &mdash; before it reaches the next 10,000 of them.
+            </p>
+        </section>
+    </article>
+    """
+
+
+def generate_html(data, demo=None):
     """Generate self-contained HTML with embedded JSON data.
 
     Design: a "case file" reading room, not a generic admin table. Serif for
@@ -172,6 +263,7 @@ def generate_html(data):
     fonts/CDNs: the whole thing has to work offline from a double-clicked file.
     """
     json_data = json.dumps(data, indent=2)
+    demo_html = render_demo_html(demo)
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -549,6 +641,122 @@ def generate_html(data):
         .edge-tech {{ margin-top: 4px; font-size: 11.5px; color: var(--ink-soft); font-family: var(--font-mono); }}
 
         .no-data {{ color: var(--ink-soft); text-align: center; padding: 30px; font-size: 13.5px; }}
+
+        /* Case study demo tab */
+        .demo-hero {{
+            text-align: center;
+            padding: 36px 20px 32px;
+            border-bottom: 1px solid var(--rule);
+            margin-bottom: 34px;
+        }}
+
+        .demo-hero-num {{
+            font-family: var(--font-display);
+            font-size: 84px;
+            font-weight: 700;
+            line-height: 1;
+            color: var(--brand);
+            letter-spacing: -0.02em;
+        }}
+
+        .demo-hero-unit {{ font-size: 30px; font-weight: 400; margin-left: 3px; color: var(--ink-soft); }}
+
+        .demo-hero-caption {{
+            font-size: 15.5px;
+            color: var(--ink-soft);
+            max-width: 46ch;
+            margin: 14px auto 0;
+            line-height: 1.55;
+        }}
+
+        .demo-hero-caption strong {{ color: var(--ink); font-weight: 700; }}
+
+        .demo-scene {{ margin-bottom: 44px; }}
+
+        .demo-scene-label {{
+            font-size: 11px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--brand);
+            font-weight: 700;
+            margin-bottom: 10px;
+        }}
+
+        .demo-copy {{ font-size: 14.5px; line-height: 1.65; max-width: 74ch; margin-bottom: 18px; }}
+        .demo-copy em {{ font-style: italic; }}
+
+        .demo-quote {{
+            font-family: var(--font-display);
+            font-style: italic;
+            font-size: 18.5px;
+            line-height: 1.5;
+            padding: 20px 26px;
+            border-left: 3px solid var(--brand);
+            background: var(--brand-soft);
+            border-radius: 0 6px 6px 0;
+            margin: 20px 0 26px;
+        }}
+
+        .demo-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 22px; }}
+
+        .demo-panel {{
+            background: var(--paper-raised);
+            border: 1px solid var(--rule);
+            border-radius: 8px;
+            padding: 18px 20px;
+        }}
+
+        .demo-panel h4 {{
+            font-size: 11.5px;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--ink-soft);
+            font-weight: 700;
+            margin-bottom: 12px;
+        }}
+
+        .demo-edges {{ display: flex; flex-direction: column; gap: 10px; }}
+        .demo-edge {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; }}
+        .demo-edge-signal {{ text-transform: capitalize; }}
+        .demo-edge-conf {{ color: var(--ink-soft); font-size: 11.5px; margin-left: auto; }}
+
+        .demo-callout {{
+            background: var(--paper-raised);
+            border: 1px solid var(--rule);
+            border-left: 4px solid var(--queue);
+            border-radius: 6px;
+            padding: 16px 20px;
+        }}
+
+        .demo-callout p {{ font-size: 13.5px; line-height: 1.6; margin-top: 10px; }}
+
+        .demo-stat-small {{ font-family: var(--font-display); font-size: 32px; font-weight: 700; color: var(--resolved); }}
+        .demo-stat-small.alert-num {{ color: var(--alert); }}
+        .demo-stat-caption {{ font-size: 12.5px; color: var(--ink-soft); margin-top: 4px; line-height: 1.5; }}
+        .demo-stat-caption code {{ font-family: var(--font-mono); font-size: 11px; }}
+
+        .demo-compare {{ display: flex; flex-direction: column; gap: 14px; margin: 22px 0; }}
+
+        .demo-compare-row {{
+            display: grid;
+            grid-template-columns: 190px 1fr 190px;
+            gap: 14px;
+            align-items: center;
+            font-size: 12.5px;
+        }}
+
+        .demo-compare-label {{ color: var(--ink-soft); font-weight: 600; }}
+        .demo-compare-track {{ height: 10px; border-radius: 5px; background: var(--normal-soft); overflow: hidden; }}
+        .demo-compare-fill {{ height: 100%; border-radius: 5px; }}
+        .demo-compare-fill.resolved {{ background: var(--resolved); }}
+        .demo-compare-fill.alert {{ background: var(--alert); }}
+        .demo-compare-value {{ font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-soft); }}
+
+        @media (max-width: 780px) {{
+            .demo-grid {{ grid-template-columns: 1fr; }}
+            .demo-compare-row {{ grid-template-columns: 1fr; }}
+            .demo-hero-num {{ font-size: 60px; }}
+        }}
     </style>
 </head>
 <body>
@@ -592,12 +800,15 @@ def generate_html(data):
         </header>
 
         <nav class="tabs">
-            <button class="tab-button active" onclick="switchTab(event, 'queue')">Review Queue</button>
+            <button class="tab-button active" onclick="switchTab(event, 'demo')">Case Study: Sarah</button>
+            <button class="tab-button" onclick="switchTab(event, 'queue')">Review Queue</button>
             <button class="tab-button" onclick="switchTab(event, 'timeline')">Customer Story</button>
             <button class="tab-button" onclick="switchTab(event, 'audit')">Identity Merge Audit</button>
         </nav>
 
-        <div id="queue" class="view active">
+        <div id="demo" class="view active">{demo_html}</div>
+
+        <div id="queue" class="view">
             <p class="view-intro" id="queueIntro">Loading&hellip;</p>
             <div class="controls">
                 <input type="text" id="queueSearch" placeholder="Search case or ID&hellip;" onkeyup="filterQueue()">

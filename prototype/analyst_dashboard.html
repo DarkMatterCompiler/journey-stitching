@@ -374,6 +374,122 @@
         .edge-tech { margin-top: 4px; font-size: 11.5px; color: var(--ink-soft); font-family: var(--font-mono); }
 
         .no-data { color: var(--ink-soft); text-align: center; padding: 30px; font-size: 13.5px; }
+
+        /* Case study demo tab */
+        .demo-hero {
+            text-align: center;
+            padding: 36px 20px 32px;
+            border-bottom: 1px solid var(--rule);
+            margin-bottom: 34px;
+        }
+
+        .demo-hero-num {
+            font-family: var(--font-display);
+            font-size: 84px;
+            font-weight: 700;
+            line-height: 1;
+            color: var(--brand);
+            letter-spacing: -0.02em;
+        }
+
+        .demo-hero-unit { font-size: 30px; font-weight: 400; margin-left: 3px; color: var(--ink-soft); }
+
+        .demo-hero-caption {
+            font-size: 15.5px;
+            color: var(--ink-soft);
+            max-width: 46ch;
+            margin: 14px auto 0;
+            line-height: 1.55;
+        }
+
+        .demo-hero-caption strong { color: var(--ink); font-weight: 700; }
+
+        .demo-scene { margin-bottom: 44px; }
+
+        .demo-scene-label {
+            font-size: 11px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--brand);
+            font-weight: 700;
+            margin-bottom: 10px;
+        }
+
+        .demo-copy { font-size: 14.5px; line-height: 1.65; max-width: 74ch; margin-bottom: 18px; }
+        .demo-copy em { font-style: italic; }
+
+        .demo-quote {
+            font-family: var(--font-display);
+            font-style: italic;
+            font-size: 18.5px;
+            line-height: 1.5;
+            padding: 20px 26px;
+            border-left: 3px solid var(--brand);
+            background: var(--brand-soft);
+            border-radius: 0 6px 6px 0;
+            margin: 20px 0 26px;
+        }
+
+        .demo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 22px; }
+
+        .demo-panel {
+            background: var(--paper-raised);
+            border: 1px solid var(--rule);
+            border-radius: 8px;
+            padding: 18px 20px;
+        }
+
+        .demo-panel h4 {
+            font-size: 11.5px;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--ink-soft);
+            font-weight: 700;
+            margin-bottom: 12px;
+        }
+
+        .demo-edges { display: flex; flex-direction: column; gap: 10px; }
+        .demo-edge { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12.5px; }
+        .demo-edge-signal { text-transform: capitalize; }
+        .demo-edge-conf { color: var(--ink-soft); font-size: 11.5px; margin-left: auto; }
+
+        .demo-callout {
+            background: var(--paper-raised);
+            border: 1px solid var(--rule);
+            border-left: 4px solid var(--queue);
+            border-radius: 6px;
+            padding: 16px 20px;
+        }
+
+        .demo-callout p { font-size: 13.5px; line-height: 1.6; margin-top: 10px; }
+
+        .demo-stat-small { font-family: var(--font-display); font-size: 32px; font-weight: 700; color: var(--resolved); }
+        .demo-stat-small.alert-num { color: var(--alert); }
+        .demo-stat-caption { font-size: 12.5px; color: var(--ink-soft); margin-top: 4px; line-height: 1.5; }
+        .demo-stat-caption code { font-family: var(--font-mono); font-size: 11px; }
+
+        .demo-compare { display: flex; flex-direction: column; gap: 14px; margin: 22px 0; }
+
+        .demo-compare-row {
+            display: grid;
+            grid-template-columns: 190px 1fr 190px;
+            gap: 14px;
+            align-items: center;
+            font-size: 12.5px;
+        }
+
+        .demo-compare-label { color: var(--ink-soft); font-weight: 600; }
+        .demo-compare-track { height: 10px; border-radius: 5px; background: var(--normal-soft); overflow: hidden; }
+        .demo-compare-fill { height: 100%; border-radius: 5px; }
+        .demo-compare-fill.resolved { background: var(--resolved); }
+        .demo-compare-fill.alert { background: var(--alert); }
+        .demo-compare-value { font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-soft); }
+
+        @media (max-width: 780px) {
+            .demo-grid { grid-template-columns: 1fr; }
+            .demo-compare-row { grid-template-columns: 1fr; }
+            .demo-hero-num { font-size: 60px; }
+        }
     </style>
 </head>
 <body>
@@ -417,12 +533,142 @@
         </header>
 
         <nav class="tabs">
-            <button class="tab-button active" onclick="switchTab(event, 'queue')">Review Queue</button>
+            <button class="tab-button active" onclick="switchTab(event, 'demo')">Case Study: Sarah</button>
+            <button class="tab-button" onclick="switchTab(event, 'queue')">Review Queue</button>
             <button class="tab-button" onclick="switchTab(event, 'timeline')">Customer Story</button>
             <button class="tab-button" onclick="switchTab(event, 'audit')">Identity Merge Audit</button>
         </nav>
 
-        <div id="queue" class="view active">
+        <div id="demo" class="view active">
+    <article class="demo">
+        <div class="demo-hero">
+            <div class="demo-hero-num">6<span class="demo-hero-unit">ms</span></div>
+            <p class="demo-hero-caption">
+                is how long it took Sarah's failed app dispute to become queryable in the
+                real-time store &mdash; <strong>90 seconds before she even finished dialing.</strong>
+            </p>
+        </div>
+
+        <section class="demo-scene">
+            <div class="demo-scene-label">Scene 1 &mdash; the agent already knows</div>
+            <p class="demo-copy">
+                Sarah is traveling. She opens the Amex app to dispute a $200 charge she doesn't
+                recognize &mdash; her connection drops mid-submission. Ninety seconds later, she
+                calls support.
+            </p>
+
+            <blockquote class="demo-quote">
+                &ldquo;Hi Sarah &mdash; I see you were just trying to dispute a $200 charge on the
+                app a few seconds ago. I have the details right here. Are you safe?&rdquo;
+            </blockquote>
+
+            <div class="demo-grid">
+                <div class="demo-panel">
+                    <h4>Why the agent already knew</h4>
+                    <div class="demo-edges">
+        <div class="demo-edge">
+            <span class="edge-type deterministic">DETERMINISTIC</span>
+            <span class="demo-edge-signal">dispute ref</span>
+            <span class="demo-edge-conf">100% confidence</span>
+        </div>
+        <div class="demo-edge">
+            <span class="edge-type probabilistic">PROBABILISTIC</span>
+            <span class="demo-edge-signal">device fingerprint</span>
+            <span class="demo-edge-conf">85% confidence</span>
+        </div>
+        <div class="demo-edge">
+            <span class="edge-type probabilistic">PROBABILISTIC</span>
+            <span class="demo-edge-signal">email hash</span>
+            <span class="demo-edge-conf">70% confidence</span>
+        </div>
+        <div class="demo-edge">
+            <span class="edge-type tiebreaker">TIEBREAKER</span>
+            <span class="demo-edge-signal">ip</span>
+            <span class="demo-edge-conf">30% confidence</span>
+        </div></div>
+                </div>
+                <div class="demo-panel">
+                    <h4>Her case, in order</h4>
+                    <div class="timeline">
+        <div class="timeline-event APP">
+            <div>
+                <div class="timeline-header">
+                    <span class="channel-pill APP">APP</span>
+                    <span class="event-type">APP DISPUTE SUBMIT FAIL</span>
+                    
+                </div>
+                <div class="event-meta"><code>EVT-SARAH-1</code></div>
+            </div>
+        </div>
+        <div class="timeline-event CALL">
+            <div>
+                <div class="timeline-header">
+                    <span class="channel-pill CALL">CALL</span>
+                    <span class="event-type">INBOUND CALL</span>
+                    <span class="flag human">HUMAN AGENT</span>
+                </div>
+                <div class="event-meta"><code>EVT-SARAH-2</code></div>
+            </div>
+        </div></div>
+                </div>
+            </div>
+
+            <div class="demo-callout">
+                <span class="badge normal">NORMAL &middot; 27.5 / 100</span>
+                <p>This customer is still unresolved. The score isn't dramatic here &mdash; correctly. It rewards
+                <em>accumulated</em> risk (repeat contacts, elapsed unresolved time), and a case
+                that's one channel-switch old hasn't built any up yet. What actually changed this
+                call wasn't an alert &mdash; it was the agent having her timeline already open.</p>
+            </div>
+        </section>
+
+        <section class="demo-scene">
+            <div class="demo-scene-label">Scene 2 &mdash; the pattern behind the Sarahs who aren't saved</div>
+            <p class="demo-copy">
+                Sarah's own two-event case is too short to register as a risk pattern on its own
+                &mdash; and it shouldn't, she was helped immediately. But she isn't the only card
+                member whose app dispute fails and who then calls. Some of those calls
+                <em>don't</em> get resolved on the first try. That's the same pattern, surfacing
+                automatically, in the aggregate:
+            </p>
+
+            <div class="demo-grid">
+                <div class="demo-panel">
+                    <h4>The shared opening step</h4>
+                    <p class="demo-stat-small">below threshold</p>
+                    <p class="demo-stat-caption">lift for the step Sarah also took &mdash;
+                    correctly ignored, since customers who get saved share it too.</p>
+                </div>
+                <div class="demo-panel">
+                    <h4>The pattern that predicts trouble</h4>
+                    <p class="demo-stat-small alert-num">6510x</p>
+                    <p class="demo-stat-caption">lift for <code>APP:APP_DISPUTE_SUBMIT_FAIL → CALL:DISPUTE_FOLLOWUP → CALL:ESCALATION_REQUEST</code> &mdash;
+                    found in 65% of unresolved cases, 0% of resolved ones.</p>
+                </div>
+            </div>
+
+            <div class="demo-compare">
+                <div class="demo-compare-row">
+                    <span class="demo-compare-label">Resolved on first contact</span>
+                    <div class="demo-compare-track"><div class="demo-compare-fill resolved" style="width:12.934703385846666%"></div></div>
+                    <span class="demo-compare-value">12.9 avg &middot; 0/500 queued</span>
+                </div>
+                <div class="demo-compare-row">
+                    <span class="demo-compare-label">Not resolved, repeat contact</span>
+                    <div class="demo-compare-track"><div class="demo-compare-fill alert" style="width:76.61863809456506%"></div></div>
+                    <span class="demo-compare-value">76.6 avg &middot; 497/500 queued</span>
+                </div>
+            </div>
+
+            <p class="demo-copy">
+                The same event that made Sarah's call effortless is, at scale, an event a product
+                team can now see is failing customers &mdash; before it reaches the next 10,000 of them.
+            </p>
+        </section>
+    </article>
+    </div>
+
+        <div id="queue" class="view">
             <p class="view-intro" id="queueIntro">Loading&hellip;</p>
             <div class="controls">
                 <input type="text" id="queueSearch" placeholder="Search case or ID&hellip;" onkeyup="filterQueue()">
