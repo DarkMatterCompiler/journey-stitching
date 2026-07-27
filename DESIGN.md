@@ -267,6 +267,7 @@ and should be tested, not just designed for.
 | Identity resolution | Aggregate pairwise P/R at 10k journeys, 40% stripped | Segment-stratified P/R + adversarial twin test |
 | Latency | P95/P99 event-to-queryable time under load | Real scenario check: is context present before the 10s-later call lands |
 | Actionability | Chaos injection flagged by PrefixSpan + escalation score | Outcome lift vs. control cohort + holdout-group intervention effect on churn/repeat-contact |
+| (cross-cutting) | — | Time-to-audit-a-merge (analyst-facing legibility) |
 
 ### 8.5 Results (from the working prototype, `prototype/run_all.py`)
 
@@ -313,4 +314,52 @@ illustrative -- no default archetype or the chaos cohort itself ever reaches it 
 outcome" label share underlying fields, so this validates the measurement machinery, not an
 independently-discovered predictor; and the outcome-lift result demonstrates the method can
 detect a manufactured effect, not that a real intervention reduces real churn.
-| (cross-cutting) | — | Time-to-audit-a-merge (analyst-facing legibility) |
+
+## 9. Demo Narrative
+
+Two scenes, told with numbers the system actually produces (`prototype/demo_sarah.py`) rather
+than illustrative ones -- run it yourself; the output isn't scripted prose, it's printed by the
+real pipeline, identity graph, and eval code.
+
+### Scene 1 (micro) -- the agent has context before the customer finishes dialing
+
+Sarah is traveling. She opens the Amex app to dispute a $200 charge she doesn't recognize --
+her connection drops mid-submission (`APP_DISPUTE_SUBMIT_FAIL`). Ninety seconds later she calls
+support.
+
+Running the demo against a 1,500-member background population:
+
+- **Identity resolution** links her app event and her call into one case via four separate
+  edges: a deterministic `dispute_ref` match (100% confidence -- the mechanism §4 describes,
+  a call routing back to an app-originated case), a probabilistic `device_fingerprint` match
+  boosted by time-proximity (85%), a probabilistic `email_hash` match (70%), and an `ip`
+  tiebreaker (30%, recorded for audit only, per §4's design).
+- **Real-time serving layer**: her app-fail event became queryable in the KV store **45ms**
+  after it happened. She doesn't call for another 90 seconds -- her context has been sitting
+  there the whole time before the call even connects.
+- **Escalation score at the moment she calls: 27.5 (NORMAL)** -- deliberately not dramatic.
+  The original pitch for this narrative called for a flashing red 88; the actual formula
+  doesn't produce that, and rather than fabricate a number, this doc reports the real one and
+  explains why: the score rewards *accumulated* risk (repeat contacts, elapsed unresolved
+  time), and a single-channel-switch case that's 90 seconds old hasn't accumulated any yet.
+  The capability that actually changes this call isn't the score -- it's that the agent's
+  screen already shows her app attempt: *"I see you were just trying to dispute a $200 charge
+  on the app a few seconds ago -- I have the details right here. Are you safe?"* instead of
+  making her start over. That's real-time KV lookup + deterministic identity linking working
+  exactly as designed, not an escalation alert.
+
+### Scene 2 (macro) -- the pattern behind the Sarahs who aren't saved on the first call
+
+Sarah's own two-event journey is too short and too quickly staffed to register as a risk
+pattern by itself -- and it shouldn't; she was helped immediately. But she isn't the only card
+member whose app dispute fails and who then calls, and some of those calls don't get resolved
+on the first try. That's exactly the chaos-cohort pattern already measured in §8.5: the shared
+opening step (`APP_DISPUTE_SUBMIT_FAIL -> CALL`) scores below the lift threshold on its own
+(correctly not flagged -- it's shared with customers who get saved, like Sarah), while the
+cohort-only extension (a second, unresolved call) scores **~2300-3600x lift** and pushes those
+accounts to an average escalation score of ~77, with 99% entering the analyst queue.
+
+The handoff from Scene 1 to Scene 2 is the actual point of the architecture: the same
+`APP_DISPUTE_SUBMIT_FAIL` event that let one agent save one call is, in aggregate, a pattern a
+product team can now see is failing customers systematically -- before it reaches the next
+10,000 of them -- because every channel's events are finally stitched into one place to look.

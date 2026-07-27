@@ -131,6 +131,20 @@ obviously broken, so these were hand-verified rather than taken on trust:
 Runs every stage in sequence and prints one consolidated report, regenerating the dashboard at
 the end. This is the single command that exercises the whole system.
 
+### Demo narrative — `prototype/demo_sarah.py`
+
+Two scenes, told with numbers the system actually produces rather than illustrative ones —
+see **[DESIGN.md §9](DESIGN.md#9-demo-narrative)** for the full write-up:
+
+- **Scene 1 (micro)**: a card member's app dispute fails mid-submission; she calls 90 seconds
+  later. The demo shows her two events resolving to one case across four distinct edge types,
+  her app event becoming queryable in the real-time store in ~45ms (ready well before she
+  finishes dialing), and an honest look at what the escalation score does and doesn't do at
+  that moment.
+- **Scene 2 (macro)**: zooms out to the aggregate pattern behind card members who share her
+  opening step but *don't* get resolved on the first call — the same chaos-cohort pattern
+  mining from the actionability eval, with real lift and escalation numbers.
+
 ## Running it
 
 Python 3.10+, standard library only — no `pip install` required.
@@ -138,6 +152,7 @@ Python 3.10+, standard library only — no `pip install` required.
 ```bash
 cd prototype
 python run_all.py                 # full run: accuracy, latency, actionability, dashboard
+python demo_sarah.py              # the micro/macro demo narrative
 python eval_identity.py           # identity resolution accuracy only (10k members)
 python eval_actionability.py      # latency + chaos injection + auditability only
 python export_snapshot.py         # just regenerate analyst_dashboard.html
