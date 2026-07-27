@@ -71,6 +71,54 @@ joined there is no clean way to split them if a merge turns out wrong. Instead:
 - Every merge keeps its confidence score and reason so analysts can audit *why* two
   interactions were linked, and can retract that reasoning later.
 
+### Mechanism, concretely — when does the union actually happen?
+
+It's easy to conflate "an edge gets created" with "two identities get merged." In this design
+(and in the working prototype, `prototype/identity_graph.py`) those are two separate steps that
+happen at two separate times:
+
+**Step 1 — ingestion creates edges, nothing merges yet.** As each event arrives, it's compared
+against every prior event that shares a signal value (membership rewards ID, ANI, device
+fingerprint, etc., via a signal-value index). Every match becomes an `Edge` — typed
+deterministic / probabilistic / tiebreaker, with a confidence score and a human-readable reason
+— and gets appended to a flat edge list. At this point **no event has a canonical ID yet**. The
+edge list is just evidence accumulating; nothing has been grouped.
+
+**Step 2 — merging happens once, in a batch, only when identity is resolved.** A single
+`resolve_all()` pass is what actually unions events into identities. It does this by building
+an adjacency graph from only the currently-*valid* edges of the allowed type(s), then walking
+every event with a graph traversal (BFS/DFS): whichever events end up reachable from each other
+in that walk get assigned the **same canonical ID** — that assignment, not the edge creation, is
+the merge. This runs twice per resolution pass, over two different edge-type filters:
+
+- **Confirmed ID** — traversal restricted to deterministic edges only.
+- **Analytics ID** — traversal allowed over deterministic + probabilistic edges (tiebreaker
+  edges are excluded from both, by construction — they can never cause a merge).
+
+**Worked example.** Events A, B, C arrive. A and B share a membership rewards ID (deterministic
+edge). B and C share a device fingerprint (probabilistic edge). No merging has happened yet —
+just two edges sitting in the list. When resolution runs:
+- For **Confirmed ID**, only the A–B edge is traversable, so the graph walk finds two groups:
+  `{A, B}` and `{C}` alone. A and B share a Confirmed ID; C gets its own.
+- For **Analytics ID**, both edges are traversable in the same pass, so the walk reaches
+  A→B→C and finds one group: `{A, B, C}`. All three share an Analytics ID.
+
+This is why the two IDs can (and routinely do) disagree for the same events — they're computed
+from the same edge list but with a different admission filter on which edges may be walked.
+
+**Why this isn't literal union-find, and why that trade-off is worth it.** Classic union-find
+(parent pointers, union-by-rank, path compression) is a one-way structure: once two sets are
+joined, there's no clean way to split them back apart if the merge turns out to be wrong. Since
+retraction is a hard requirement here (see the bullet list above), the design instead treats the
+edge list as the only source of truth and **recomputes** groupings from scratch on every resolution pass,
+rather than maintaining merged state incrementally. Invalidating a bad edge is then just
+flipping one boolean (`valid = False`) — the next resolution pass simply can't traverse that
+edge anymore, and the split falls out naturally from the graph walk, with no explicit "undo"
+operation required. The cost is a full O(V+E) recompute per resolution pass instead of
+union-find's near-O(1) amortized operations; at prototype scale (tens of thousands of events)
+this is negligible (well under a second, measured in §8.5), and it buys a genuinely simpler
+retraction story than trying to bolt splitting onto union-find after the fact.
+
 ### Refinement: false-positive blast radius (compliance-driven)
 Incorrectly merging two identities in a FinTech context is not just a UX bug — it's a
 potential data-exposure incident (e.g., exposing one card member's dispute data to another
